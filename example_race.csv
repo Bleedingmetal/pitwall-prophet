@@ -1,0 +1,21 @@
+driver_name,team_name,grid_position,grid_pos_norm,points,fastest_lap_rank,pit_stops,avg_pit_duration,status_encoded
+Max Verstappen,Red Bull Racing,1,0.05,575,1,2,23.5,1
+Lando Norris,McLaren,2,0.10,374,2,2,24.1,1
+Charles Leclerc,Ferrari,3,0.15,356,3,2,23.8,1
+Oscar Piastri,McLaren,4,0.20,292,4,2,24.3,1
+Carlos Sainz,Williams,5,0.25,244,5,2,25.0,1
+George Russell,Mercedes,6,0.30,245,6,2,24.5,1
+Lewis Hamilton,Ferrari,7,0.35,223,7,2,24.8,1
+Sergio Perez,Red Bull Racing,8,0.40,152,8,2,25.2,1
+Fernando Alonso,Aston Martin,9,0.45,70,9,2,26.0,1
+Nico Hulkenberg,Kick Sauber,10,0.50,37,10,2,26.5,1
+Yuki Tsunoda,Red Bull Racing,11,0.55,30,11,2,27.0,1
+Pierre Gasly,Alpine,12,0.60,26,12,2,27.5,1
+Lance Stroll,Aston Martin,13,0.65,24,13,1,28.0,1
+Esteban Ocon,Haas F1 Team,14,0.70,23,14,2,28.5,1
+Kevin Magnussen,Haas F1 Team,15,0.75,16,15,2,29.0,1
+Alexander Albon,Williams,16,0.80,12,16,2,29.5,1
+Daniel Ricciardo,Racing Bulls,17,0.85,12,17,1,30.0,1
+Oliver Bearman,Haas F1 Team,18,0.90,7,18,2,30.5,1
+Franco Colapinto,Alpine,19,0.95,5,19,2,31.0,1
+Liam Lawson,Racing Bulls,20,1.00,4,20,2,31.5,1
