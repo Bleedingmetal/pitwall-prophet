@@ -539,6 +539,127 @@ class F1PositionPredictionPipeline:
         metrics['mrr'] = self.compute_mean_reciprocal_rank(predictions, targets, mask)
         
         return metrics
+
+    def average_pairwise_accuracy(self, predictions: np.ndarray, targets: np.ndarray, masks: np.ndarray = None) -> float:
+       
+        per_race_accs = []
+        n_races = predictions.shape[0]
+
+        for r in range(n_races):
+            pred = predictions[r]
+            true = targets[r]
+            if masks is not None:
+                mask = masks[r].astype(bool)
+            else:
+                mask = np.ones_like(true, dtype=bool)
+
+            idxs = np.where(mask)[0]
+            m = len(idxs)
+            if m < 2:
+                continue
+
+            # compute pairwise comparisons
+            total_pairs = 0
+            correct_pairs = 0
+            for i in range(m):
+                for j in range(i + 1, m):
+                    ii = idxs[i]
+                    jj = idxs[j]
+                    t_diff = int(true[ii]) - int(true[jj])
+                    p_diff = int(pred[ii]) - int(pred[jj])
+
+                    # sign comparison
+                    s_t = 0 if t_diff == 0 else (1 if t_diff > 0 else -1)
+                    s_p = 0 if p_diff == 0 else (1 if p_diff > 0 else -1)
+
+                    if s_t == s_p:
+                        correct_pairs += 1
+                    total_pairs += 1
+
+            if total_pairs > 0:
+                per_race_accs.append(correct_pairs / total_pairs)
+
+        return float(np.mean(per_race_accs)) if per_race_accs else 0.0
+
+    def displacement_at_k(self, predictions: np.ndarray, targets: np.ndarray, masks: np.ndarray = None, k: int = 3) -> float:
+       
+        per_race_disp = []
+        n_races = predictions.shape[0]
+
+        for r in range(n_races):
+            pred = predictions[r]
+            true = targets[r]
+            if masks is not None:
+                mask = masks[r].astype(bool)
+            else:
+                mask = np.ones_like(true, dtype=bool)
+
+            # indices of drivers with true position <= k and valid
+            idxs = np.where((true <= k) & mask)[0]
+            if idxs.size == 0:
+                continue
+
+            disp = np.abs(pred[idxs].astype(float) - true[idxs].astype(float)).mean()
+            per_race_disp.append(disp)
+
+        return float(np.mean(per_race_disp)) if per_race_disp else 0.0
+
+    def compute_podium_metrics(self, predictions: np.ndarray, targets: np.ndarray, masks: np.ndarray = None) -> dict:
+        
+        #DNFs predicted for true podium drivers are penalized by mapping to PENALTY_POSITION.
+       
+        PENALTY_POSITION = 30
+
+        total_podium = 0
+        correct_within2 = 0
+        podium_dnf_errors = 0
+        penalized_errors = []
+
+        n_races = predictions.shape[0]
+
+        for r in range(n_races):
+            pred = predictions[r]
+            true = targets[r]
+            if masks is not None:
+                mask = masks[r].astype(bool)
+            else:
+                mask = np.ones_like(true, dtype=bool)
+
+            idxs = np.where((true >= 1) & (true <= 3) & mask)[0]
+            if idxs.size == 0:
+                continue
+
+            for i in idxs:
+                t = int(true[i])
+                p = int(pred[i])
+                total_podium += 1
+
+                if p == 21:
+                    podium_dnf_errors += 1
+                    penalized_errors.append(abs(PENALTY_POSITION - t))
+                    # automatically incorrect for within-2
+                    continue
+
+                # non-DNF
+                if abs(p - t) <= 2:
+                    correct_within2 += 1
+
+                penalized_errors.append(abs(p - t))
+
+        if total_podium > 0:
+            podium_within_2_acc = correct_within2 / total_podium
+            podium_dnf_rate = podium_dnf_errors / total_podium
+            podium_penalized_mae = float(np.mean(penalized_errors)) if penalized_errors else 0.0
+        else:
+            podium_within_2_acc = 0.0
+            podium_dnf_rate = 0.0
+            podium_penalized_mae = 0.0
+
+        return {
+            'podium_within_2_acc': float(podium_within_2_acc),
+            'podium_dnf_rate': float(podium_dnf_rate),
+            'podium_penalized_mae': float(podium_penalized_mae)
+        }
     
     def train_single_fold(self, X_train_fold, y_train_fold, X_val_fold, y_val_fold, params):
         # Train model on a single fold and return validation accuracy
@@ -1011,11 +1132,39 @@ class F1PositionPredictionPipeline:
         print(f"Rank Biased Overlap (RBO): {ranking_metrics['rbo']:.4f}")
         print(f"Mean Reciprocal Rank (MRR): {ranking_metrics['mrr']:.4f}")
         
+        # PAIRWISE AND TOP-K RANK ACCURACY METRICS
+        print(f"\n{'='*80}")
+        print("PAIRWISE AND TOP-K RANK ACCURACY METRICS")
+        print(f"{'='*80}")
+
+        try:
+            pairwise_acc = self.average_pairwise_accuracy(all_preds, all_targets, all_masks)
+            disp_at_3 = self.displacement_at_k(all_preds, all_targets, all_masks, k=3)
+            disp_at_5 = self.displacement_at_k(all_preds, all_targets, all_masks, k=5)
+
+            print(f"Average Pairwise Accuracy (mean over races): {pairwise_acc * 100:.2f}%")
+            print(f"Displacement@3 (mean abs error for true top-3): {disp_at_3:.2f} positions")
+            print(f"Displacement@5 (mean abs error for true top-5): {disp_at_5:.2f} positions")
+        except Exception as e:
+            print(f"Failed to compute pairwise/top-k metrics: {e}")
+
+        # PODIUM-FOCUSED METRICS (WITH DNF PENALTY)
+        print(f"\n{'='*80}")
+        print("PODIUM-FOCUSED METRICS (WITH DNF PENALTY)")
+        print(f"{'='*80}")
+        try:
+            podium_metrics = self.compute_podium_metrics(all_preds, all_targets, all_masks)
+            print(f"Podium within ±2 positions (no DNFs allowed): {podium_metrics['podium_within_2_acc'] * 100:.2f}%")
+            print(f"Podium DNF rate (true podium predicted as DNF): {podium_metrics['podium_dnf_rate'] * 100:.2f}%")
+            print(f"Podium penalized MAE (DNF mapped to position 30): {podium_metrics['podium_penalized_mae']:.2f} positions")
+        except Exception as e:
+            print(f"Failed to compute podium metrics: {e}")
+
         # Production-grade evaluation metrics
         print(f"\n{'='*80}")
         print("PRODUCTION-GRADE EVALUATION METRICS")
         print(f"{'='*80}")
-        
+
         self._production_evaluation_metrics(all_preds, all_targets, all_masks, tol2_acc)
         
         print("="*80 + "\n")
@@ -1269,9 +1418,9 @@ class F1PositionPredictionPipeline:
         print("-" * 35)
         for i in range(10):  # Positions 1-10
             acc = diagonal[i] / total_per_class[i] if total_per_class[i] > 0 else 0
-            print("2d")
+            
         dnf_acc = diagonal[10] / total_per_class[10] if total_per_class[10] > 0 else 0
-        print("5.1f")
+        
         
         # 4. Feature Usage Analysis
         print(f"\n4. FEATURE USAGE VALIDATION")
@@ -1295,7 +1444,7 @@ class F1PositionPredictionPipeline:
             for idx in dnf_features:
                 feature_values = X_test_flat[valid, idx]
                 correlation = np.corrcoef(feature_values, dnf_outcomes.astype(int))[0, 1]
-                print("30s")
+                
         else:
             print("No DNF features found in feature set")
         
