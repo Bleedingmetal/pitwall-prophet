@@ -2,6 +2,8 @@
 \usepackage{fullpage}
 \usepackage{graphicx}
 \usepackage{booktabs}
+\usepackage{tikz}
+\usetikzlibrary{positioning, arrows.meta}
 \setlength{\parskip}{5pt}
 \setlength{\parindent}{0pt}
 
@@ -91,5 +93,75 @@ Even with limited mid race data the final model captures much of the predictable
 \section*{Appendix: ChatGPT Prompt and Response}
 
 https://chatgpt.com/share/6937450c-3968-800f-82c4-fe1aa16f16b2
+
+\section{Neural Network Diagram}
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[
+    x=1.8cm,
+    y=1.0cm,
+    >=stealth,
+    neuron/.style={circle, draw, minimum size=10pt, inner sep=0pt},
+    every node/.style={font=\small}
+]
+
+%---------------- Input layer ----------------
+\foreach \name/\y in {I1/1.5, I2/0.5, I3/-0.5, I4/-1.5} {
+    \node[neuron, fill=gray!15] (\name) at (0,\y) {};
+}
+\node[left=0.5cm of I1, align=right] {Grid};
+\node[left=0.5cm of I2, align=right] {Pit stats};
+\node[left=0.5cm of I3, align=right] {Fastest lap};
+\node[left=0.5cm of I4, align=right] {Team one-hot};
+
+%---------------- Hidden layer 1 (64 units) ----------------
+\foreach \name/\y in {H11/2.0, H12/1.0, H13/0.0, H14/-1.0, H15/-2.0} {
+    \node[neuron, fill=green!15] (\name) at (2,\y) {};
+}
+
+
+%---------------- Hidden layer 2 (32 units) ----------------
+\foreach \name/\y in {H21/1.5, H22/0.5, H23/-0.5, H24/-1.5} {
+    \node[neuron, fill=green!15] (\name) at (4,\y) {};
+}
+
+
+%---------------- Output layer (21 logits) ----------------
+\foreach \name/\y/\lab in {O1/1.5/{1st}, O2/0.5/{2nd}, O3/-0.5/{3rd}, O4/-1.5/{DNF / others}} {
+    \node[neuron, fill=orange!20] (\name) at (6,\y) {};
+    \node[right=0.4cm of \name] {\lab};
+}
+
+
+%---------------- Connections ----------------
+\foreach \i in {1,...,4} {
+    \foreach \j in {1,...,5} {
+        \draw[->] (I\i) -- (H1\j);
+    }
+}
+
+\foreach \i in {1,...,5} {
+    \foreach \j in {1,...,4} {
+        \draw[->] (H1\i) -- (H2\j);
+    }
+}
+
+\foreach \i in {1,...,4} {
+    \foreach \j in {1,...,4} {
+        \draw[->] (H2\i) -- (O\j);
+    }
+}
+\node at (3,-3.1) [align=center] {
+  Input: driver feature vector (grid, pit stats, fastest lap, team one-hot)\\
+  Hidden: two fully connected layers (64 and 32 units, ReLU + BN + dropout)\\
+  Output: 21 logits for positions 1--20 + DNF
+};
+\end{tikzpicture}
+
+\caption{Neural network used for per-driver scoring. The model ingests a driver feature vector and produces 21 logits, which are converted to a valid race order through the Hungarian assignment.}
+\end{figure}
+
+
 
 \end{document}
