@@ -2,6 +2,8 @@ import csv
 import re
 import time
 from collections import defaultdict
+import warnings
+warnings.filterwarnings('ignore')
 
 import requests
 from bs4 import BeautifulSoup
