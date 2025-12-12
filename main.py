@@ -1176,11 +1176,11 @@ class F1PositionPredictionPipeline:
 
     def visualize_loss_landscape_f_theta(self, sample_size: int = 50, grid_size: int = 21,
                                          alpha: float = 1.0,
-                                         save_path: str = "loss_landscape_f_theta.png") -> None:
+                                         save_path: str = "loss_landscape_f_theta.png") -> tuple:
         # Visualize f(theta): loss as a function of parameters in a 2D PCA plane.
-        if not self.theta_history:
-            print("No theta history found. Train the model first.")
-            return
+        if not self.theta_history or len(self.theta_history) < 3:
+            print("Not enough theta history found (need at least 3). Train the model first.")
+            return None, None
 
         print("\nGenerating f(theta) loss landscape visualization...")
 
@@ -1189,12 +1189,16 @@ class F1PositionPredictionPipeline:
 
         # PCA in parameter space
         pca = PCA(n_components=2)
-        pca.fit(theta_mat)
+        proj = pca.fit_transform(theta_mat)  # [E,2]
 
         theta_star = theta_mat[-1]     # final parameters
         d1, d2 = pca.components_       # two principal directions
 
-        #  small subset of data to estimate loss
+        # scale grid extents by the std dev of the trajectory projections
+        s1 = proj[:, 0].std()
+        s2 = proj[:, 1].std()
+
+        # small subset of data to estimate loss
         X = self.X_train
         y = self.y_train
         mask = self.create_mask(y)
@@ -1220,11 +1224,38 @@ class F1PositionPredictionPipeline:
                     p.copy_(new_vals)
                     offset += numel
 
-        #evaluate loss on a 2D grid in PCA coordinates
-        us = np.linspace(-alpha, alpha, grid_size)
-        vs = np.linspace(-alpha, alpha, grid_size)
+        #evaluate loss on a 2D grid in PCA coordinates scaled by trajectory std
+        us = np.linspace(-alpha * s1, alpha * s1, grid_size)
+        vs = np.linspace(-alpha * s2, alpha * s2, grid_size)
         U, V = np.meshgrid(us, vs)
         Z = np.zeros_like(U)
+
+        # Prepare class weights as used during training (same logic as train_final_model)
+        y_flat = self.y_train.flatten()
+        valid_mask_global = (y_flat >= 1) & (y_flat <= 21)
+        y_valid_global = y_flat[valid_mask_global]
+        class_counts = np.bincount((y_valid_global - 1).astype(int), minlength=21)
+        total_samples = class_counts.sum()
+        class_weights = total_samples / (class_counts + 1e-6)
+        class_weights[20] *= 10.0
+        class_weights = class_weights / class_weights.sum() * 21
+        class_weights_t = torch.from_numpy(class_weights).float().to(self.device)
+
+        # FocalLoss matching training
+        class FocalLossLocal(nn.Module):
+            def __init__(self, alpha=None, gamma=2.0, reduction='none'):
+                super(FocalLossLocal, self).__init__()
+                self.alpha = alpha
+                self.gamma = gamma
+                self.reduction = reduction
+
+            def forward(self, inputs, targets):
+                ce_loss = nn.functional.cross_entropy(inputs, targets, weight=self.alpha, reduction='none')
+                pt = torch.exp(-ce_loss)
+                focal_loss = ((1 - pt) ** self.gamma) * ce_loss
+                return focal_loss
+
+        fl = FocalLossLocal(alpha=class_weights_t, gamma=2.0, reduction='none')
 
         self.model.eval()
         with torch.no_grad():
@@ -1241,26 +1272,37 @@ class F1PositionPredictionPipeline:
                     targets_flat = (y_t - 1).clamp(0, 20).view(-1)
                     mask_flat = mask_t.view(-1)
 
-                    ce = nn.functional.cross_entropy(
-                        logits_flat, targets_flat, reduction='none'
-                    )
-                    loss = (ce * mask_flat).sum().item() / (mask_flat.sum().item() + 1e-8)
+                    loss_per_sample = fl(logits_flat, targets_flat)
+                    # mask-average
+                    loss = (loss_per_sample * mask_flat).sum().item() / (mask_flat.sum().item() + 1e-8)
                     Z[i, j] = loss
 
         # project training trajectory into PCA plane
-        traj_2d = pca.transform(theta_mat)  # [epochs, 2]
+        traj_2d = proj  # [epochs, 2]
 
         # plot surface + trajectory
         fig = plt.figure(figsize=(8, 6))
         ax = fig.add_subplot(111, projection='3d')
         ax.plot_surface(U, V, Z, linewidth=0, antialiased=True, alpha=0.75)
+        # compute training trajectory z-values by mapping projected points to nearest grid cell
+        z_traj = []
+        flat_us = us
+        flat_vs = vs
+        for (u_proj, v_proj) in traj_2d:
+            # find nearest grid index
+            du = np.abs(flat_us - u_proj)
+            dv = np.abs(flat_vs - v_proj)
+            iu = np.argmin(du)
+            iv = np.argmin(dv)
+            z_traj.append(Z[iv, iu])
+
         ax.plot(
             traj_2d[:, 0],
             traj_2d[:, 1],
-            [Z.min() - 0.1] * len(traj_2d),
+            z_traj,
             marker='o',
             color='black',
-            label='Training trajectory',
+            label='Training trajectory (projection)',
         )
 
         ax.set_xlabel("PCA dir 1 in parameter space")
@@ -1269,12 +1311,11 @@ class F1PositionPredictionPipeline:
         ax.set_title("Loss landscape f(θ) with training trajectory")
         ax.legend()
         plt.tight_layout()
-        plt.savefig(save_path, dpi=200)
-        plt.close(fig)
+        # Interactive display; don't save to disk
+        plt.show()
+        return fig, ax
 
-        print(f"Saved f(theta) loss landscape figure to {save_path}")
-
-    def visualize_prediction_surface_g_x(self, grid_size: int = 51, alpha: float = 2.0,
+    def visualize_prediction_surface_g_x(self, race_idx:int = 0, driver_idx:int = 0, grid_size: int = 51, alpha: float = 2.5,
                                          save_path: str = "prediction_surface_g_x.png") -> None:
         # Visualize g(x): model predictions as a function of input features in a 2D PCA plane.
         print("\nGenerating g(x) prediction surface visualization...")
@@ -1283,17 +1324,21 @@ class F1PositionPredictionPipeline:
             print("g(x) visualization currently implemented only for standard (non-pointer, non-conditional) model.")
             return
 
-        #  flatten all driver features from training set
+        # 1) Flatten training driver feature vectors, scale, PCA
+        from sklearn.preprocessing import StandardScaler
+
         num_races, num_drivers, num_features = self.X_train.shape
         X_flat = self.X_train.reshape(-1, num_features)  # [num_races * drivers, num_features]
 
-        # PCA in feature space
+        scaler = StandardScaler().fit(X_flat)
+        X_scaled = scaler.transform(X_flat)
+
         pca = PCA(n_components=2)
-        X_2d = pca.fit_transform(X_flat)
+        X_2d = pca.fit_transform(X_scaled)
         mean_2d = X_2d.mean(axis=0)
         std_2d = X_2d.std(axis=0)
 
-        #  build grid in PCA space around mean
+        # 2) Prepare grid in PCA (scaled) space around mean
         u_vals = np.linspace(mean_2d[0] - alpha * std_2d[0],
                              mean_2d[0] + alpha * std_2d[0], grid_size)
         v_vals = np.linspace(mean_2d[1] - alpha * std_2d[1],
@@ -1301,37 +1346,79 @@ class F1PositionPredictionPipeline:
         U, V = np.meshgrid(u_vals, v_vals)
         grid_points_2d = np.stack([U.ravel(), V.ravel()], axis=1)  # [G, 2]
 
-        # 3) map grid back to original feature space
-        grid_features = pca.inverse_transform(grid_points_2d)  # [G, num_features]
-        grid_features_t = torch.from_numpy(grid_features).float().to(self.device)
+        # 3) Choose base race context and driver index
+        if race_idx < 0 or race_idx >= num_races:
+            raise ValueError(f"race_idx {race_idx} out of range [0, {num_races})")
+        if driver_idx < 0 or driver_idx >= num_drivers:
+            raise ValueError(f"driver_idx {driver_idx} out of range [0, {num_drivers})")
 
-        # 4) run through encoder + position head
+        base_race = self.X_train[race_idx].copy()  # [num_drivers, num_features]
+        # Mask for valid drivers from training labels (if available)
+        try:
+            race_mask = self.create_mask(self.y_train[[race_idx]])[0]
+        except Exception:
+            race_mask = np.ones((num_drivers,), dtype=np.float32)
+
+        # 4) For each grid point: inverse transform to scaled features -> original features,
+        #    replace driver feature in the base race, forward the full race input through
+        #    the model, compute softmax probabilities, run Hungarian matching and DNF adjustment,
+        #    then record assigned finishing position for selected driver.
+        Z = np.zeros_like(U)
+
         self.model.eval()
         with torch.no_grad():
-            encoded = self.model.encoder(grid_features_t)   # [G, hidden_dim]
-            logits = self.model.position_head(encoded)      # [G, 21]
-            probs = torch.softmax(logits, dim=-1)           # [G, 21]
-            
-            # expected finishing position: sum_k p_k * k
-            positions = torch.arange(1, 22, device=self.device).float()
-            expected_position = (probs * positions).sum(dim=-1)  # [G]
-            expected_position_np = expected_position.cpu().numpy()
+            # Pre-create tensors for the base race to reuse
+            for i in range(grid_points_2d.shape[0]):
+                pt2d = grid_points_2d[i]
+                # map back to scaled features then to original feature scale
+                scaled_feat = pca.inverse_transform(pt2d.reshape(1, -1))  # [1, F] scaled
+                orig_feat = scaler.inverse_transform(scaled_feat).reshape(-1)  # [F]
 
-        Z = expected_position_np.reshape(U.shape)
+                # replace driver feature
+                race_input = base_race.copy()
+                race_input[driver_idx] = orig_feat
+
+                # model forward expects [batch, drivers, features]
+                x_t = torch.from_numpy(race_input.reshape(1, num_drivers, num_features)).float().to(self.device)
+                logits = self.model(x_t)  # [1, drivers, 21]
+                probs = torch.softmax(logits, dim=-1)  # torch tensor
+
+                # prepare mask as tensor of shape [1, num_drivers]
+                mask_t = torch.from_numpy(np.array([race_mask])).float().to(self.device)
+
+                # Hungarian matching and DNF adjustment
+                assignments = self.hungarian_matching(probs, mask_t)  # numpy int32
+                assignments_adj = self.adjust_positions_for_dnfs(assignments)
+
+                assigned_pos = int(assignments_adj[0, driver_idx])
+                Z.ravel()[i] = assigned_pos
 
         # plot surface
         fig = plt.figure(figsize=(8, 6))
         ax = fig.add_subplot(111, projection='3d')
-        ax.plot_surface(U, V, Z, linewidth=0, antialiased=True)
-        ax.set_xlabel("PC1 of driver feature space")
-        ax.set_ylabel("PC2 of driver feature space")
-        ax.set_zlabel("Expected finishing position")
-        ax.set_title("Prediction surface g(x) in PCA driver-feature space")
-        plt.tight_layout()
-        plt.savefig(save_path, dpi=200)
-        plt.close(fig)
+        surf = ax.plot_surface(U, V, Z, linewidth=0, antialiased=True, cmap='viridis')
+        fig.colorbar(surf, ax=ax, shrink=0.6, aspect=10)
+        # Choose top-2 contributing features by absolute loading for each PC
+        try:
+            comp = pca.components_
+            # Ensure we have at least two features
+            pc1_idxs = np.argsort(np.abs(comp[0]))[::-1][:2]
+            pc2_idxs = np.argsort(np.abs(comp[1]))[::-1][:2]
+            pc1_feats = [self.feature_names[i] for i in pc1_idxs]
+            pc2_feats = [self.feature_names[i] for i in pc2_idxs]
+        except Exception:
+            # Fallback to generic labels if something goes wrong
+            pc1_feats = ["PC1_feature1", "PC1_feature2"]
+            pc2_feats = ["PC2_feature1", "PC2_feature2"]
 
-        print(f"Saved g(x) prediction surface figure to {save_path}")
+        ax.set_xlabel(f"PC1 ({pc1_feats[0]}, {pc1_feats[1]})")
+        ax.set_ylabel(f"PC2 ({pc2_feats[0]}, {pc2_feats[1]})")
+        ax.set_zlabel("Assigned finishing position (after Hungarian)")
+        ax.set_title(f"Prediction surface g(x) for race {race_idx}, driver {driver_idx} (assigned position)")
+        plt.tight_layout()
+        # Do not save to disk; display interactively and return figure & axes
+        plt.show()
+        return fig, ax
     
     def _production_evaluation_metrics(self, predictions, targets, masks, tol2_acc):
         # Comprehensive production-grade evaluation metrics
